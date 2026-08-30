@@ -24,8 +24,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    Choice,
     HealthResponse,
+    ModelCard,
     ModelList,
+    ResponseMessage,
+    Usage,
 )
 
 MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")
@@ -71,9 +75,14 @@ def list_models() -> ModelList:
     Build a ModelList from schemas.py and return it. Use int(time.time()) for
     created.
     """
-    # TODO: return a ModelList whose single ModelCard.id == MODEL_ID
-    raise NotImplementedError("implement GET /v1/models")
-
+    return ModelList(
+    data=[
+        ModelCard(
+            id=MODEL_ID,
+            created=int(time.time()),
+        )
+    ]
+)
 
 # ---------------------------------------------------------------------------
 # POST /v1/chat/completions  -- TODO (non-streaming first)
@@ -113,8 +122,57 @@ def chat_completions(req: ChatCompletionRequest) -> ChatCompletionResponse:
     Generation blocks the event loop this week. That is acceptable: week 3's
     engine owns concurrency. Name it, do not solve it here.
     """
-    # TODO: implement non-streaming chat completion per the contract above
-    raise NotImplementedError("implement POST /v1/chat/completions")
+    messages = [m.model_dump() for m in req.messages]
+
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        return_tensors="pt",
+    )
+
+    prompt_tokens = input_ids.shape[1]
+
+    with torch.no_grad():
+        out = model.generate(
+            input_ids,
+            max_new_tokens=req.max_tokens,
+            do_sample=req.temperature > 0,
+            temperature=req.temperature if req.temperature > 0 else None,
+        )
+
+    new_tokens = out[0][prompt_tokens:]
+    completion_tokens = len(new_tokens)
+
+    text = tokenizer.decode(
+        new_tokens,
+        skip_special_tokens=True,
+    )
+
+    finish_reason = (
+        "length"
+        if completion_tokens >= req.max_tokens
+        else "stop"
+    )
+
+    return ChatCompletionResponse(
+        id="chatcmpl-" + uuid.uuid4().hex,
+        created=int(time.time()),
+        model=req.model,
+        choices=[
+            Choice(
+                message=ResponseMessage(
+                    role="assistant",
+                    content=text,
+                ),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
